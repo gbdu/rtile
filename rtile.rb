@@ -9,7 +9,7 @@ include REXML
 
 
 NAME = "rtile"
-VERSION = "1.97"
+VERSION = "1.96"
 
 GROW_PUSHBACK = 32
 
@@ -20,15 +20,13 @@ end
 
 
 def main()
-	settings = Settings.new()
-	additions = []
-	(ARGV.select do |arg| arg.start_with? "--add-to-config=" end).each do |addition|
-		additions << addition.sub(/^--add-to-config=/, "")
-	end
-	settings.read((ARGV.include? "--no-config-file") ? nil : "#{ENV['HOME']}/.config/rtile/rtile.xml", additions)
+	settings = Settings.new("#{ENV['HOME']}/.config/rtile/rtile.xml")
+	
+	id_in = (id_in_ = ARGV.grep(/--id=(\d)/)).empty? ? 1 : id_in_.first.gsub(/^--id=/, '')
+	median_in = (median_in_ = ARGV.grep(/--median=(\d)/)).empty? ? 0 : median_in_.first.gsub(/^--median=/, '')
 
 	if ARGV.include? "--all"
-		tile_all(settings, Window.get_visible_windows(), Monitor.get_monitors(), Monitor.get_current_workspace())
+		tile_all(settings, Window.get_visible_windows(), Monitor.get_monitors(), Monitor.get_current_workspace(), id_in, median_in.to_f)
 	elsif ARGV.include? "--all-binary"
 		tile_all_binary(settings, Window.get_visible_windows(), Monitor.get_monitors(), Monitor.get_current_workspace())
 	elsif ARGV.include? "--all-auto"
@@ -92,9 +90,11 @@ end
 
 def binary(settings, windows, monitors, current_workspace)
 	windows = windows.reverse[0...2]
+	windows = windows.reverse[0...2]
+	
 	monitor = get_monitor(windows.last, monitors)
 	horizontal = (windows.last.width.to_f / windows.last.height.to_f) < (monitor.width.to_f / monitor.height.to_f)
-	split(settings, windows.last, horizontal ? 'up' : 'left', [windows.first])
+	split(settings, windows.last, horizontal ? 'up' : 'left', [windows.first] )
 end
 
 
@@ -406,18 +406,30 @@ def auto_tile_all(settings, binary = false)
 end
 
 
-def tile_all(settings, windows, monitors, current_workspace)
+def tile_all(settings, windows, monitors, current_workspace, config_id=0, median_in=0)
 	monitor_hash = get_monitor_window_hash(monitors, windows)
-	median = settings.medians[current_workspace]
+	
+	median = median_in == 0 ? settings.medians[current_workspace] : median_in
+	
+	if median > 0.9 or median < 0.2
+		puts "invalid median #{median}, must be between 0.2 and 0.9"
+		return
+	end
 
+
+	#median = settings.medians[current_workspace]
+
+	puts "using median #{median}, calculated #{median_in}"
+	
 	monitors.each do |monitor|
 		monitor_windows = get_sorted_monitor_windows(settings, monitor_hash[monitor.name], monitor, current_workspace)
 		next if monitor_windows.empty?
 		
 		column_sizes = nil
 		unless settings.column_configs.empty?
-			column_config = settings.column_configs.select do |cs| (cs.workspace.nil? or cs.workspace == current_workspace) and (cs.monitor.nil? or cs.monitor == monitor.name or cs.monitor == monitor.id.to_s) and cs.windows == monitor_windows.size end.last
+			column_config = settings.column_configs.select do |cs| (cs.workspace.nil? or cs.workspace == current_workspace) and (cs.monitor.nil? or cs.monitor == monitor.name or cs.monitor == monitor.id.to_s) and cs.windows == monitor_windows.size and (cs.id.nil? or cs.id == config_id.to_i) end.last
 			column_sizes = column_config.column_sizes unless column_config.nil?
+			#puts "using #{config_id}"
 		end
 		
 		columns = []
@@ -571,7 +583,7 @@ end
 class Settings
 	attr_reader :medians, :reverse_x, :reverse_y, :gaps, :floating, :high_priority_windows, :low_priority_windows, :column_configs, :fake_windows, :col_max_size_main, :col_max_size, :col_max_count
 
-	def initialize()
+	def initialize(config_file = nil)
 		@medians = {}
 		@reverse_x = []
 		@reverse_y = []
@@ -584,34 +596,30 @@ class Settings
 		@col_max_size_main = 2
 		@col_max_size = 4
 		@col_max_count = 2
-	end
 
-	
-	def read(config_file, additions = [])
-		unless config_file.nil? or File.exists?(config_file)
+		return if config_file.nil?
+
+		unless File.exists?(config_file)
 			FileUtils.mkdir_p(File.dirname(config_file))
 			xml_file = File.new(config_file, 'w')
 			xml_file.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<settings>\n	<gaps top=\"42\" bottom=\"22\" left=\"22\" right=\"22\" windows_x=\"22\" windows_y=\"22\"/>\n	<columns max_size_main=\"2\" max_size=\"4\" max_count=\"2\"/>\n\n	<!--<workspace id=\"<id>\" median=\"0.5\" reverse_x=\"true|false\" reverse_y=\"true|false\"/>-->\n\n	<!--<window class=\"<class>\" priority=\"high|low\" floating=\"true|false\" fake_windows=\"1|2|3|...\"/>-->\n\t<column_config windows=\"1\" workspace=\"all\" column_sizes=\"1\"/>\n\t<column_config windows=\"2\" workspace=\"all\" column_sizes=\"1, 1\"/>\n\t<column_config windows=\"3\" workspace=\"all\" column_sizes=\"1, 2\"/>\n\t<column_config windows=\"4\" workspace=\"all\" column_sizes=\"1, 3\"/>\n\t<column_config windows=\"5\" workspace=\"all\" column_sizes=\"2, 3\"/>\n\t<column_config windows=\"6\" workspace=\"all\" column_sizes=\"2, 4\"/>\n\t<column_config windows=\"7\" workspace=\"all\" column_sizes=\"1, 2, 4\"/>\n</settings>")
 			xml_file.close
 		end
 
-		xml_string = config_file.nil? ? "<settings></settings>" : File.new(config_file).read
-		additions.each do |addition|
-			xml_string.gsub!(/<\/settings>/, "#{addition}\\0")
-		end
-		xml_doc = Document.new(xml_string)
+		xml_file = File.new(config_file)
+		xml_doc = Document.new(xml_file)		
 		xml_doc.elements["settings"].elements.each do |el|
 			if el.name == 'gaps'
-				@gaps[:top] = el.attributes["top"].to_i unless el.attributes["top"].nil?
-				@gaps[:bottom] = el.attributes["bottom"].to_i unless el.attributes["bottom"].nil?
-				@gaps[:left] = el.attributes["left"].to_i unless el.attributes["left"].nil?
-				@gaps[:right] = el.attributes["right"].to_i unless el.attributes["right"].nil?
-				@gaps[:windows_x] = el.attributes["windows_x"].to_i unless el.attributes["windows_x"].nil?
-				@gaps[:windows_y] = el.attributes["windows_y"].to_i unless el.attributes["windows_y"].nil?
+				@gaps[:top] = el.attributes["top"].to_i
+				@gaps[:bottom] = el.attributes["bottom"].to_i
+				@gaps[:left] = el.attributes["left"].to_i
+				@gaps[:right] = el.attributes["right"].to_i
+				@gaps[:windows_x] = el.attributes["windows_x"].to_i
+				@gaps[:windows_y] = el.attributes["windows_y"].to_i
 			elsif el.name == 'columns'
-				@col_max_size_main = el.attributes["max_size_main"].to_i unless el.attributes["max_size_main"].nil?
-				@col_max_size = el.attributes["max_size"].to_i unless el.attributes["max_size"].nil?
-				@col_max_count = el.attributes["max_count"].to_i unless el.attributes["max_count"].nil?
+				@col_max_size_main = el.attributes["max_size_main"].to_i
+				@col_max_size = el.attributes["max_size"].to_i
+				@col_max_count = el.attributes["max_count"].to_i
 			elsif el.name == 'workspace'
 				workspace_id = el.attributes["id"]
 				unless el.attributes["median"].nil?
@@ -637,7 +645,7 @@ class Settings
 					@fake_windows[window_class] = el.attributes["fake_windows"].to_i
 				end
 			elsif el.name == 'column_config'
-				column_configs << ColumnConfig.new(el.attributes["windows"], el.attributes["workspace"], el.attributes["column_sizes"], el.attributes["monitor"])
+				column_configs << ColumnConfig.new(el.attributes["windows"], el.attributes["workspace"], el.attributes["column_sizes"], el.attributes["monitor"], el.attributes["id"])
 			end
 		end
 	end
@@ -685,12 +693,13 @@ end
 
 
 class ColumnConfig
-	attr_reader :windows, :workspace, :column_sizes, :monitor
+	attr_reader :windows, :workspace, :column_sizes, :monitor, :id
 
-	def initialize(windows, workspace, column_sizes, monitor)
+	def initialize(windows, workspace, column_sizes, monitor, id)
 		@windows = windows.to_i
 		@workspace = workspace == 'all' ? nil : workspace
 		@monitor = monitor == 'all' ? nil : monitor
+		@id = id.to_i # user specified id
 		@column_sizes = column_sizes.split(/ *, */).collect do |cs| cs.to_i end
 	end
 end
